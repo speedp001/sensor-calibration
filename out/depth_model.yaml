@@ -1,0 +1,3 @@
+scale: 1.042460560798645
+bias: -0.006863976828753948
+equation: z_measured(m) ≈ scale * z_true(m) + bias
