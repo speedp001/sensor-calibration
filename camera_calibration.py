@@ -16,7 +16,7 @@ CHECKER_COLS      = 8              # 내부 코너(열)
 SQUARE_SIZE_M     = 0.025           # 한 칸 길이[m] (예: 25mm -> 0.025)
 ALIGN_TO_COLOR    = True            # depth->color 정렬 사용 권장
 DEPTH_MM_TO_M     = 1.0/1000.0      # RealSense z16(mm) -> m
-# ===============================================================
+# ====================================================================
 
 class CheckerSpec:
     rows: int
