@@ -16,8 +16,8 @@ CHECKER_COLS      = 8              # 내부 코너(열)
 SQUARE_SIZE_M     = 0.025           # 한 칸 길이[m] (예: 25mm -> 0.025)
 ALIGN_TO_COLOR    = True            # depth->color 정렬 사용 권장
 DEPTH_MM_TO_M     = 1.0/1000.0      # RealSense z16(mm) -> m
-# ===============================================================
-@dataclass
+# ====================================================================
+
 class CheckerSpec:
     rows: int
     cols: int
@@ -65,6 +65,7 @@ def record_rgbd():
     cfg = rs.config()
     cfg.enable_stream(rs.stream.color, IMG_SIZE[0], IMG_SIZE[1], rs.format.bgr8, FPS)
     cfg.enable_stream(rs.stream.depth, IMG_SIZE[0], IMG_SIZE[1], rs.format.z16, FPS)
+    
     # IMU 스트림 가능하면 활성화
     imu_enabled = False
     try:
