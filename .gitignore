@@ -1,2 +1,2 @@
 # Ignore generated calibration parameters and captures
-parameters/
+out/
