@@ -10,7 +10,7 @@ SAVE_DIR         = "out"
 FRAME_DIR        = os.path.join(SAVE_DIR, "frames")
 IMG_SIZE         = (640, 480)      # (width, height) color
 FPS               = 30 
-MIN_DET           = 500              # 최소 체커보드 검출 프레임
+MIN_DET           = 5              # 최소 체커보드 검출 프레임
 CHECKER_ROWS      = 6              # 내부 코너(행)
 CHECKER_COLS      = 8              # 내부 코너(열)
 SQUARE_SIZE_M     = 0.025           # 한 칸 길이[m] (예: 25mm -> 0.025)
@@ -18,6 +18,7 @@ ALIGN_TO_COLOR    = True            # depth->color 정렬 사용 권장
 DEPTH_MM_TO_M     = 1.0/1000.0      # RealSense z16(mm) -> m
 # ====================================================================
 
+@dataclass
 class CheckerSpec:
     rows: int
     cols: int
