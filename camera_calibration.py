@@ -1,31 +1,26 @@
 import os
 import csv
-import time
 import json
 import glob
-import numpy as np
-import cv2 as cv
 import yaml
+import cv2 as cv
+import numpy as np
 import pyrealsense2 as rs
 
 
 
-
-
-def obj_points(rows, cols, square_size):
-    objp = np.zeros((rows * cols, 3), np.float32)
-    grid = np.mgrid[0:cols, 0:rows].T.reshape(-1, 2)
-    objp[:, :2] = grid * square_size
-    return objp
-
+# 코너 검출 함수
 def find_corners(img_bgr, rows, cols):
     gray = cv.cvtColor(img_bgr, cv.COLOR_BGR2GRAY)
-    ret, corners = cv.findChessboardCorners(gray, (cols, rows),
-                                           cv.CALIB_CB_ADAPTIVE_THRESH + cv.CALIB_CB_NORMALIZE_IMAGE)
+    ret, corners = cv.findChessboardCorners(gray, (cols, rows), cv.CALIB_CB_ADAPTIVE_THRESH + cv.CALIB_CB_NORMALIZE_IMAGE)
+    
     if not ret:
         return False, None
+    
+    # 초기 코너 검출의 낮은 정밀도를 보완하기 위해 서브픽셀 활용
     term = (cv.TERM_CRITERIA_EPS + cv.TERM_CRITERIA_MAX_ITER, 30, 1e-3)
     corners = cv.cornerSubPix(gray, corners, (11,11), (-1,-1), term)
+    
     return True, corners
 
 # IMU 기능 여부 확인
@@ -120,15 +115,29 @@ def record(target_shots):
     # RealSense 설정 객체 생성
     cfg = rs.config()
 
-    # 호환 프로필
-    profile = device_RGBD()
-    w,h,fps = profile
+    # 호환 프로필 (width, height, fps)
+    selected = device_RGBD()
+    w,h,fps = selected
 
     cfg.enable_stream(rs.stream.color, w, h, rs.format.bgr8, fps)
     cfg.enable_stream(rs.stream.depth, w, h, rs.format.z16, fps)
     print(f"[INFO] Selected profile: {w}x{h} @ {fps}")
 
-    # 초기 공장 보정값 저장
+    # IMU 탑재 여부: IMU 스트림을 cfg에 추가
+    imu_enabled = False
+    if device_IMU():
+        cfg.enable_stream(rs.stream.gyro, rs.format.motion_xyz32f)
+        cfg.enable_stream(rs.stream.accel, rs.format.motion_xyz32f)
+        imu_enabled = True
+        print("[INFO] IMU enabled")
+    else:
+        print("[INFO] IMU disabled")
+
+    # 파이프라인 시작
+    profile = pipe.start(cfg)
+    print("[INFO] pipeline started (IMU enabled: {})".format(imu_enabled))
+
+    # 초기 공장 보정값 저장 (활성화된 프로파일에서 intrinsics 추출)
     factory_c = profile.get_stream(rs.stream.color).as_video_stream_profile().get_intrinsics()
     factory_d = profile.get_stream(rs.stream.depth).as_video_stream_profile().get_intrinsics()
     with open(os.path.join(SAVE_DIR, "factory_intrinsics.yaml"), "w") as f:
@@ -137,22 +146,6 @@ def record(target_shots):
             'depth': dict(w=factory_d.width, h=factory_d.height, fx=factory_d.fx, fy=factory_d.fy, cx=factory_d.ppx, cy=factory_d.ppy, dist=list(factory_d.coeffs))
         }, f, sort_keys=False, allow_unicode=True)
     print("[INFO] factory_intrinsics.yaml saved")
-
-    # IMU 탑재 여부
-    imu_enabled = False
-    if device_IMU():
-        cfg.enable_stream(rs.stream.gyro, rs.format.motion_xyz32f)
-        cfg.enable_stream(rs.stream.accel, rs.format.motion_xyz32f)
-        imu_enabled = True
-        print("[INFO] IMU enabled")
-
-    else:
-        print("[INFO] IMU disabled")
-
-    # IMU가 활성화된 경우: IMU + RGBD 동시에 설정된 cfg로 파이프라인 시작
-    # IMU가 비활성화된 경우: RGBD만 포함된 cfg로 파이프라인 시작
-    profile = pipe.start(cfg)
-    print("[INFO] pipeline started (IMU enabled: {})".format(imu_enabled))
 
     # imu_log: list of [t_ns, gx,gy,gz, ax,ay,az]
     imu_log = []
@@ -164,7 +157,7 @@ def record(target_shots):
     shots = 0
     idx = 0
 
-    # 캡쳐 시작
+    # 루프 시작
     while shots < target_shots:
         frames = pipe.wait_for_frames()
         
@@ -173,13 +166,13 @@ def record(target_shots):
             align = rs.align(rs.stream.color) 
             frames = align.process(frames)
 
-        # IMU 프레임 읽기
+        # IMU 읽기
         if imu_enabled:
             gf = frames.first_or_default(rs.stream.gyro)
             af = frames.first_or_default(rs.stream.accel)
 
             if gf and af:
-                t_ns = int(frames.get_timestamp() * 1e6)
+                t_ns = int(gf.get_timestamp() * 1e6)
                 
                 g = gf.as_motion_frame().get_motion_data()
                 a = af.as_motion_frame().get_motion_data()
@@ -198,34 +191,38 @@ def record(target_shots):
         color = np.asanyarray(cf.get_data())
         depth = np.asanyarray(df.get_data())
 
-        ok, corners = find_corners(color, CHECKER_ROWS, CHECKER_COLS)
+        find, corners = find_corners(color, CHECKER_ROWS, CHECKER_COLS)
         disp = color.copy()
-        if ok:
+        if find:
             cv.drawChessboardCorners(disp, (CHECKER_COLS, CHECKER_ROWS), corners, True)
-        cv.putText(disp, f"shots: {shots}/{target_shots}", (8,20),
-                   cv.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,0), 2)
+        cv.putText(disp, f"shots: {shots}/{target_shots}", (8,20), cv.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,0), 2)
 
+        # 화면에 color 출력
         cv.imshow("color", disp)
+        
+        # 화면에 depth 출력
         depth_vis = (depth.astype(np.float32) * (1.0/1000.0))
         dv = np.clip(depth_vis/3.0*255.0, 0, 255).astype(np.uint8)
         dv[depth == 0] = 0
         cv.imshow("depth", cv.applyColorMap(dv, cv.COLORMAP_JET))
 
         key = cv.waitKey(1) & 0xFF
-        if key in (10, 13, 32, ord('c')):  # Enter/Space/c
-            t_ns = int(frames.get_timestamp() * 1e6)
+        # Enter/Space/c
+        if key in (10, 13, 32, ord('c')):  
+            t_ns = int(cf.get_timestamp() * 1e6)
             cv.imwrite(os.path.join(FRAME_DIR, f"color_{idx:06d}.png"), color)
             np.save(os.path.join(FRAME_DIR, f"depth_{idx:06d}.npy"), depth)
             with open(os.path.join(FRAME_DIR, f"meta_{idx:06d}.json"), "w") as f:
-                json.dump({'t_ns': t_ns, 'detected': bool(ok)}, f)
+                json.dump({'t_ns': t_ns, 'detected': bool(find)}, f)
             shots += 1
             idx += 1
-            print(f"[SAVE] {shots}/{target_shots} saved (detected={ok})")
+            print(f"[SAVE] {shots}/{target_shots} saved (detected={find})")
+            
         elif key == ord('q'):
-            print("[INFO] 사용자 중단")
+            print("[INFO] User interrupted")
             break
 
-    # 루프 종료 후 자원 정리 및 IMU 로그 저장
+    # 루프 종료
     pipe.stop()
     cv.destroyAllWindows()
 
@@ -238,35 +235,81 @@ def record(target_shots):
             w.writerows(imu_log)
         print(f"[INFO] Saved IMU log: {imu_path}")
 
-def calibrate_color_intrinsics():
-    objp = obj_points(CHECKER_ROWS, CHECKER_COLS, SQUARE_SIZE_M)
-    objpts = []
-    imgpts = []
-    size = None
-    files = sorted(glob.glob(os.path.join(FRAME_DIR, "color_*.png")))
-    for p in files:
-        img = cv.imread(p)
-        if img is None:
-            continue
-        if size is None:
-            size = (img.shape[1], img.shape[0])
-        ok, corners = find_corners(img, CHECKER_ROWS, CHECKER_COLS)
-        if ok:
-            objpts.append(objp.copy())
-            imgpts.append(corners)
-    if len(objpts) < 6:
-        print("[ERROR] 유효한 캡처 이미지가 부족합니다. 더 촬영하세요.")
-        return None, None
+def calibrate_intrinsics(rows, cols, square_size_m, dir):
+    # 코너 3차원 좌표 생성
+    corner_array = np.zeros((cols * rows, 3), np.float32)
+    """
+    objp =
+    [
+    [0., 0., 0.],
+    [0., 0., 0.],
+    ...
+    (48개 행)
+    ]
+    """
+    
+    # 2차원 그리드 생성
+    grid = np.mgrid[0:cols, 0:rows].T.reshape(-1, 2)
+    """
+    grid =
+    [
+    [0, 0],   # (x=0, y=0)
+    [1, 0],   # (x=1, y=0)
+    [2, 0],
+    ...
+    [7, 0],
+    [0, 1],
+    [1, 1],
+    ...
+    [7, 5]    # 마지막 코너
+    ]
+    """
+    
+    # 실제 물리 단위 좌표로 할당
+    corner_array[:, :2] = grid * square_size_m
+    
+    # 보정 입력 리스트
+    corner_3d = []
+    corner_2d = []
+
+    files = sorted(glob.glob(os.path.join(dir, "color_*.png")))
+    for frame in files:
+        img = cv.imread(frame)
+        size = (img.shape[1], img.shape[0])
+
+        # 읽은 이미지에서 코너 검출
+        find, corners = find_corners(img, rows, cols)
+        
+        if find:
+            # 체커보드 물리 좌표 저장
+            corner_3d.append(corner_array.copy())
+            # 검출된 코너 저장
+            corner_2d.append(corners)
+
+    if len(corner_3d) < 30:
+        raise RuntimeError("Not enough valid images for calibration.")
+    
+    # OpenCV 카메라 보정 함수
     flags = cv.CALIB_RATIONAL_MODEL
-    rms, K, dist, rvecs, tvecs = cv.calibrateCamera(objpts, imgpts, size, None, None, flags=flags)
-    print(f"[INFO] 보정 완료 RMS={rms:.4f}")
+    rms, K, dist, rvecs, tvecs = cv.calibrateCamera(corner_3d, corner_2d, size, None, None, flags=flags)
+    """
+    rms: reprojection error
+    K: camera matrix
+    dist: distortion coefficients
+    rvecs: rotation vectors
+    tvecs: translation vectors
+    """
+    
+    # Reprojection error 출력
+    print(f"[INFO] Calibration completed RMS={rms:.4f}")
+    
     with open(os.path.join(SAVE_DIR, "color_intrinsics.yaml"), "w") as f:
         yaml.safe_dump({
             'image_size': {'w': size[0], 'h': size[1]},
             'K': K.tolist(),
             'dist': dist.flatten().tolist(),
             'rms': float(rms),
-            'checkerboard': {'rows': CHECKER_ROWS, 'cols': CHECKER_COLS, 'square_m': SQUARE_SIZE_M}
+            'checkerboard': {'rows': rows, 'cols': cols, 'square_m': square_size_m}
         }, f, sort_keys=False, allow_unicode=True)
     return K, dist
 
@@ -274,6 +317,7 @@ def calibrate_color_intrinsics():
 
 
 
+# main 함수
 if __name__ == "__main__":
     
     # 결과 저장 경로
@@ -281,7 +325,7 @@ if __name__ == "__main__":
     FRAME_DIR = os.path.join(SAVE_DIR, "frames")
 
     # 캡쳐 개수 설정
-    TARGET_SHOTS = 30
+    TARGET_SHOTS = 50
 
     # 체크보드 크기(정사각형 사이즈 단위는 m)
     CHECKER_ROWS = 6
@@ -298,7 +342,7 @@ if __name__ == "__main__":
     
     # 캡처 및 보정 수행
     record(TARGET_SHOTS)
-    K, dist = calibrate_color_intrinsics()
+    K, dist = calibrate_intrinsics(CHECKER_ROWS, CHECKER_COLS, SQUARE_SIZE_M)
     if K is not None:
         print("[OK] Intrinsics saved")
     else:
