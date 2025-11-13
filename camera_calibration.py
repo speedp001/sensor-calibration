@@ -303,7 +303,7 @@ def calibrate_intrinsics(rows, cols, square_size_m, dir):
     # Reprojection error 출력
     print(f"[INFO] Calibration completed RMS={rms:.4f}")
     
-    with open(os.path.join(SAVE_DIR, "color_intrinsics.yaml"), "w") as f:
+    with open(os.path.join(SAVE_DIR, "calculated_intrinsics.yaml"), "w") as f:
         yaml.safe_dump({
             'image_size': {'w': size[0], 'h': size[1]},
             'K': K.tolist(),
