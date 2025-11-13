@@ -1,14 +1,20 @@
-# ...existing code...
-import os, glob, json
-import numpy as np
-import cv2 as cv
+import os
+import glob
+import json
 import yaml
+import cv2 as cv
+import numpy as np
 
-# 설정
-FRAME_DIR = os.path.join("out", "frames")
-SPEC_ROWS = 6
-SPEC_COLS = 8
-SPEC_SQUARE = 0.025
+
+
+
+
+# 체크보드 설정
+SAVE_DIR = "intrinsics_out"
+FRAME_DIR = os.path.join(SAVE_DIR, "frames")
+CHECKER_ROWS = 6
+CHECKER_COLS = 8
+SQUARE_SIZE_M = 0.025
 
 def load_imu_csv(path):
     # t_ns,gx,gy,gz,ax,ay,az
@@ -83,9 +89,9 @@ def estimate_rotation_extrinsic(camera_pairs, imu_pairs):
 def load_camera_poses_from_frames(frame_dir):
     # Returns list of dict {idx, t_ns, rvec, tvec}
     poses = []
-    objp = np.zeros((SPEC_ROWS*SPEC_COLS, 3), np.float32)
-    grid = np.mgrid[0:SPEC_COLS, 0:SPEC_ROWS].T.reshape(-1,2)
-    objp[:,:2] = grid * SPEC_SQUARE
+    objp = np.zeros((CHECKER_ROWS*CHECKER_COLS, 3), np.float32)
+    grid = np.mgrid[0:CHECKER_COLS, 0:CHECKER_ROWS].T.reshape(-1,2)
+    objp[:,:2] = grid * SQUARE_SIZE_M
     K, dist = None, None
     # compute poses using solvePnP for each color frame
     for p in sorted(glob.glob(os.path.join(frame_dir, "color_*.png"))):
@@ -96,7 +102,7 @@ def load_camera_poses_from_frames(frame_dir):
         meta = json.load(open(meta_p,'r'))
         t_ns = int(meta.get('t_ns', 0))
         gray = cv.cvtColor(img, cv.COLOR_BGR2GRAY)
-        ret, corners = cv.findChessboardCorners(gray, (SPEC_COLS, SPEC_ROWS))
+        ret, corners = cv.findChessboardCorners(gray, (CHECKER_COLS, CHECKER_ROWS))
         if not ret: continue
         term = (cv.TERM_CRITERIA_EPS + cv.TERM_CRITERIA_MAX_ITER, 30, 1e-3)
         corners = cv.cornerSubPix(gray, corners, (11,11), (-1,-1), term)
