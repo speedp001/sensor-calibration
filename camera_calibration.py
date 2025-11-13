@@ -1,48 +1,50 @@
-# ...existing code...
 import os
 import time
 import json
 import glob
-from dataclasses import dataclass
-
 import numpy as np
 import cv2 as cv
 import yaml
 import pyrealsense2 as rs
 
-# 저장 경로 및 설정 (IMU_calibration.py와 경로/포맷 일치)
-SAVE_DIR = "out"
+
+
+
+
+# 결과 저장 경로
+SAVE_DIR = "intrinsics_out"
 FRAME_DIR = os.path.join(SAVE_DIR, "frames")
-TARGET_SHOTS = 30             # 캡처 목표 수 (원하면 변경)
+
+# 캡쳐 개수 설정
+TARGET_SHOTS = 30
+
+# 체크보드 크기(정사각형 사이즈 단위는 m)
 CHECKER_ROWS = 6
 CHECKER_COLS = 8
-SQUARE_SIZE_M = 0.025         # m
+SQUARE_SIZE_M = 0.025
+
+# depth 프레임을 color에 정렬할지 여부
+# RGB-D 카메라에서 depth와 color의 물리적인 측정 차이를 align 처리
+# color 이미지의 각 픽셀에 해당하는 depth 값을 가져오도록 변환
 ALIGN_TO_COLOR = True
 
-@dataclass
-class CheckerSpec:
-    rows: int
-    cols: int
-    square: float
 
-SPEC = CheckerSpec(CHECKER_ROWS, CHECKER_COLS, SQUARE_SIZE_M)
 
-def ensure_dirs():
-    os.makedirs(FRAME_DIR, exist_ok=True)
+
 
 def save_yaml(path, data):
     with open(path, "w") as f:
         yaml.safe_dump(data, f, sort_keys=False, allow_unicode=True)
 
-def obj_points(spec: CheckerSpec):
-    objp = np.zeros((spec.rows * spec.cols, 3), np.float32)
-    grid = np.mgrid[0:spec.cols, 0:spec.rows].T.reshape(-1, 2)
-    objp[:, :2] = grid * spec.square
+def obj_points(rows, cols, square_size):
+    objp = np.zeros((rows * cols, 3), np.float32)
+    grid = np.mgrid[0:cols, 0:rows].T.reshape(-1, 2)
+    objp[:, :2] = grid * square_size
     return objp
 
-def find_corners(img_bgr, spec: CheckerSpec):
+def find_corners(img_bgr, rows, cols):
     gray = cv.cvtColor(img_bgr, cv.COLOR_BGR2GRAY)
-    ret, corners = cv.findChessboardCorners(gray, (spec.cols, spec.rows),
+    ret, corners = cv.findChessboardCorners(gray, (cols, rows),
                                            cv.CALIB_CB_ADAPTIVE_THRESH + cv.CALIB_CB_NORMALIZE_IMAGE)
     if not ret:
         return False, None
@@ -72,50 +74,78 @@ def device_has_motion():
         pass
     return False
 
-def choose_compatible_profile():
-    ctx = rs.context()
-    if len(ctx.devices) == 0:
-        return None
-    dev = ctx.devices[0]
+# 호환 가능한 color, depth 프로파일 선택
+def compatible_profile():
+    
+    # RealSense 장비 조회
+    context = rs.context()
+    
+    if context.devices.size() == 0:
+        raise RuntimeError("No device found.")
+    
+    # 연결된 RealSense 첫 번째 장치 선택
+    device = context.devices[0]
     color_profiles = []
     depth_profiles = []
-    for s in dev.sensors:
-        for p in s.get_stream_profiles():
-            try:
-                vp = p.as_video_stream_profile()
-                st = vp.stream_type()
-                fmt = vp.format()
-                w, h, fps = vp.width(), vp.height(), vp.fps()
-                if st == rs.stream.color:
-                    color_profiles.append((fmt, w, h, fps))
-                if st == rs.stream.depth:
-                    depth_profiles.append((fmt, w, h, fps))
-            except Exception:
-                pass
-    pref_res = [(640,480), (848,480), (1280,720), (424,240)]
-    for (w,h) in pref_res:
-        for f in (30,15,10,6,8):
-            cands = [c for c in color_profiles if c[1]==w and c[2]==h and c[3]==f]
-            dups  = [d for d in depth_profiles if d[1]==w and d[2]==h and d[3]==f]
-            if cands and dups:
-                for c in cands:
-                    if c[0] == rs.format.bgr8:
-                        return (rs.format.bgr8, w, h, f)
-                return (cands[0][0], w, h, f)
-    for c in color_profiles:
-        for d in depth_profiles:
-            if c[1]==d[1] and c[2]==d[2] and c[3]==d[3]:
-                return (c[0], c[1], c[2], c[3])
-    return None
 
-def record_rgbd_with_imu(target_shots=TARGET_SHOTS):
-    ensure_dirs()
+    # color 및 depth 센서 선택
+    for sensor in device.sensors:
+        
+        # 각 센서의 프로파일 조회
+        # RealSense 장치는 Stero(1,2), Depth, Color 센서가 존재
+        for profile in sensor.get_stream_profiles():
+
+            # 프로파일 정보 객체
+            # ex) vp: <pyrealsense2.video_stream_profile: Color(0) 424x240 @ 6fps YUYV>
+            vp = profile.as_video_stream_profile()
+            
+            # 넓이, 높이, fps, 포맷, 스트림 타입 추출
+            stream = vp.stream_type()
+            format = vp.format()
+            w, h, fps = vp.width(), vp.height(), vp.fps()
+            if stream == rs.stream.color:
+                color_profiles.append((format, w, h, fps))
+            if stream == rs.stream.depth:
+                depth_profiles.append((format, w, h, fps))
+    
+    # color와 depth 프로파일에서 공통 조합 찾기
+    menu = []
+    seen = []   # (fmt, w, h, fps)를 해시로 추적
+
+    for cf in color_profiles:
+        for df in depth_profiles:
+            if cf[1] == df[1] and cf[2] == df[2] and cf[3] == df[3]:
+                key = (cf[0], cf[1], cf[2], cf[3])
+                if key not in seen:
+                    seen.append(key)
+                    menu.append(key)
+
+    if not menu:
+        raise RuntimeError("[INFO] There is no compatible color&depth profile.")
+
+    # 터미널에 선택지 출력
+    print("Choose a compatible color&depth profile:")
+    for idx, (fmt, w, h, fps) in enumerate(menu):
+        print(f"\t[{idx}] {w}x{h} @ {fps}fps, format={fmt}")
+
+    # 사용자에게 번호 입력 받기
+    default_idx = 0
+    choice = input(f"사용할 프로파일 번호를 선택하세요 (0~{len(menu)-1}, 기본={default_idx}): ").strip()
+
+    chosen_fmt, chosen_w, chosen_h, chosen_fps = menu[choice]
+    print(f"[INFO] 선택된 프로파일: {chosen_w}x{chosen_h} @ {chosen_fps}fps, format={chosen_fmt}")
+    return (chosen_fmt, chosen_w, chosen_h, chosen_fps)
+
+def record(target_shots=TARGET_SHOTS):
+    
+    # RealSense 카메라 데이터(Depth, Color, IMU) 처리 객체 생성
     pipe = rs.pipeline()
+    # RealSense 설정 객체 생성
     cfg = rs.config()
 
-    chosen = choose_compatible_profile()
-    if chosen:
-        fmt,w,h,fps = chosen
+    profile = compatible_profile()
+    if profile:
+        fmt,w,h,fps = profile
         try:
             cfg.enable_stream(rs.stream.color, w, h, fmt, fps)
             cfg.enable_stream(rs.stream.depth, w, h, rs.format.z16, fps)
@@ -160,7 +190,7 @@ def record_rgbd_with_imu(target_shots=TARGET_SHOTS):
                 # 재구성: IMU 제거 후 재시도
                 print("[INFO] IMU 관련 문제로 보이므로 IMU 스트림 제거 후 재시도합니다.")
                 cfg = rs.config()
-                if chosen:
+                if profile:
                     try:
                         cfg.enable_stream(rs.stream.color, w, h, fmt, fps)
                         cfg.enable_stream(rs.stream.depth, w, h, rs.format.z16, fps)
@@ -238,10 +268,10 @@ def record_rgbd_with_imu(target_shots=TARGET_SHOTS):
             color = np.asanyarray(cf.get_data())
             depth = np.asanyarray(df.get_data())
 
-            ok, corners = find_corners(color, SPEC)
+            ok, corners = find_corners(color, CHECKER_ROWS, CHECKER_COLS)
             disp = color.copy()
             if ok:
-                cv.drawChessboardCorners(disp, (SPEC.cols, SPEC.rows), corners, True)
+                cv.drawChessboardCorners(disp, (CHECKER_COLS, CHECKER_ROWS), corners, True)
             cv.putText(disp, f"shots: {shots}/{target_shots}", (8,20), cv.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,0), 2)
 
             cv.imshow("color", disp)
@@ -293,8 +323,7 @@ def record_rgbd_with_imu(target_shots=TARGET_SHOTS):
             print(f"[INFO] Saved IMU log: {imu_path}")
 
 def calibrate_color_intrinsics():
-    ensure_dirs()
-    objp = obj_points(SPEC)
+    objp = obj_points(CHECKER_ROWS, CHECKER_COLS, SQUARE_SIZE_M)
     objpts = []
     imgpts = []
     size = None
@@ -305,7 +334,7 @@ def calibrate_color_intrinsics():
             continue
         if size is None:
             size = (img.shape[1], img.shape[0])
-        ok, corners = find_corners(img, SPEC)
+        ok, corners = find_corners(img, CHECKER_ROWS, CHECKER_COLS)
         if ok:
             objpts.append(objp.copy())
             imgpts.append(corners)
@@ -320,19 +349,19 @@ def calibrate_color_intrinsics():
         'K': K.tolist(),
         'dist': dist.flatten().tolist(),
         'rms': float(rms),
-        'checkerboard': {'rows': SPEC.rows, 'cols': SPEC.cols, 'square_m': SPEC.square}
+        'checkerboard': {'rows': CHECKER_ROWS, 'cols': CHECKER_COLS, 'square_m': SQUARE_SIZE_M}
     })
     return K, dist
 
-def main():
-    ensure_dirs()
-    record_rgbd_with_imu(TARGET_SHOTS)
+
+
+
+
+if __name__ == "__main__":
+    os.makedirs(FRAME_DIR, exist_ok=True)
+    record(TARGET_SHOTS)
     K, dist = calibrate_color_intrinsics()
     if K is not None:
         print("[OK] color_intrinsics saved in out/")
     else:
         print("[ERR] 보정 실패")
-
-if __name__ == "__main__":
-    main()
-# ...existing code...
