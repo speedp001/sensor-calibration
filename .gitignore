@@ -1,2 +1,2 @@
 # Ignore generated calibration parameters and captures
-out/
+intrinsics_out/

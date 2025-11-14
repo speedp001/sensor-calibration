@@ -158,7 +158,7 @@ def build_delta_pairs(poses, imu, max_dt_sec=0.5, ts_offset_ns=0):
         imu_pairs.append(imu_rot)
     return cam_pairs, imu_pairs
 
-def grid_search_time_offset(poses, imu, search_range_s=0.2, step_s=0.01):
+def grid_search_time_offset(poses, imu, search_range_s=0.2, step_s=0.00001):
     best = None
     best_err = 1e9
     rng = np.arange(-search_range_s, search_range_s+1e-9, step_s)

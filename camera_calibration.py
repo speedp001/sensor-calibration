@@ -9,6 +9,8 @@ import pyrealsense2 as rs
 
 
 
+
+
 # 코너 검출 함수
 def find_corners(img_bgr, rows, cols):
     gray = cv.cvtColor(img_bgr, cv.COLOR_BGR2GRAY)
@@ -126,8 +128,8 @@ def record(target_shots):
     # IMU 탑재 여부: IMU 스트림을 cfg에 추가
     imu_enabled = False
     if device_IMU():
-        cfg.enable_stream(rs.stream.gyro, rs.format.motion_xyz32f)
-        cfg.enable_stream(rs.stream.accel, rs.format.motion_xyz32f)
+        cfg.enable_stream(rs.stream.gyro)
+        cfg.enable_stream(rs.stream.accel)
         imu_enabled = True
         print("[INFO] IMU enabled")
     else:
@@ -169,18 +171,29 @@ def record(target_shots):
         # IMU 읽기
         if imu_enabled:
             gf = frames.first_or_default(rs.stream.gyro)
-            af = frames.first_or_default(rs.stream.accel)
-
-            if gf and af:
-                t_ns = int(gf.get_timestamp() * 1e6)
-                
+            if gf:
                 g = gf.as_motion_frame().get_motion_data()
-                a = af.as_motion_frame().get_motion_data()
-
-
+                t_ns = int(gf.get_timestamp() * 1e6)
                 gyro = [g.x, g.y, g.z]
+                imu_log.append([t_ns, gyro[0], gyro[1], gyro[2], accel[0], accel[1], accel[2]])
+
+            af = frames.first_or_default(rs.stream.accel)
+            if af:
+                a = af.as_motion_frame().get_motion_data()
+                t_ns = int(af.get_timestamp() * 1e6)
                 accel = [a.x, a.y, a.z]
                 imu_log.append([t_ns, gyro[0], gyro[1], gyro[2], accel[0], accel[1], accel[2]])
+
+            gf = frames.first_or_default(rs.stream.gyro)
+            af = frames.first_or_default(rs.stream.accel)
+            if gf and af:
+                g = gf.as_motion_frame().get_motion_data()
+                a = af.as_motion_frame().get_motion_data()
+                t_ns = int(gf.get_timestamp() * 1e6)
+                gyro = [g.x, g.y, g.z]
+                imu_log.append([t_ns, gyro[0], gyro[1], gyro[2], accel[0], accel[1], accel[2]])
+
+            af = frames.first_or_default(rs.stream.accel)
 
         cf = frames.get_color_frame()
         df = frames.get_depth_frame()
@@ -303,16 +316,38 @@ def calibrate_intrinsics(rows, cols, square_size_m, dir):
     # Reprojection error 출력
     print(f"[INFO] Calibration completed RMS={rms:.4f}")
     
-    with open(os.path.join(SAVE_DIR, "calculated_intrinsics.yaml"), "w") as f:
-        yaml.safe_dump({
-            'image_size': {'w': size[0], 'h': size[1]},
-            'K': K.tolist(),
-            'dist': dist.flatten().tolist(),
-            'rms': float(rms),
-            'checkerboard': {'rows': rows, 'cols': cols, 'square_m': square_size_m}
-        }, f, sort_keys=False, allow_unicode=True)
-    return K, dist
+    # color 항목 포맷 생성
+    color_entry = {
+        'w': int(size[0]),
+        'h': int(size[1]),
+        'fx': float(K[0,0]),
+        'fy': float(K[1,1]),
+        'cx': float(K[0,2]),
+        'cy': float(K[1,2]),
+        'dist': [float(x) for x in dist.flatten().tolist()]
+    }
 
+    # depth 항목은 0
+    depth_entry = {
+        'w': int(size[0]),
+        'h': int(size[1]),
+        'fx': 0.0,
+        'fy': 0.0,
+        'cx': 0.0,
+        'cy': 0.0,
+        'dist': [0.0, 0.0, 0.0, 0.0, 0.0]
+    }
+
+    # calculated_intrinsics.yaml 저장
+    out_dict = {
+        'color': color_entry,
+        'depth': depth_entry
+    }
+
+    with open(os.path.join(SAVE_DIR, "calculated_intrinsics.yaml"), "w") as f:
+        yaml.safe_dump(out_dict, f, sort_keys=False, allow_unicode=True)
+
+    return K, dist
 
 
 
@@ -325,7 +360,7 @@ if __name__ == "__main__":
     FRAME_DIR = os.path.join(SAVE_DIR, "frames")
 
     # 캡쳐 개수 설정
-    TARGET_SHOTS = 50
+    TARGET_SHOTS = 500
 
     # 체크보드 크기(정사각형 사이즈 단위는 m)
     CHECKER_ROWS = 6
@@ -342,7 +377,7 @@ if __name__ == "__main__":
     
     # 캡처 및 보정 수행
     record(TARGET_SHOTS)
-    K, dist = calibrate_intrinsics(CHECKER_ROWS, CHECKER_COLS, SQUARE_SIZE_M)
+    K, dist = calibrate_intrinsics(CHECKER_ROWS, CHECKER_COLS, SQUARE_SIZE_M, FRAME_DIR)
     if K is not None:
         print("[OK] Intrinsics saved")
     else:
