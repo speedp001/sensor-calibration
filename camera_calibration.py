@@ -149,8 +149,9 @@ def record(target_shots):
         }, f, sort_keys=False, allow_unicode=True)
     print("[INFO] factory_intrinsics.yaml saved")
 
-    # imu_log: list of [t_ns, gx,gy,gz, ax,ay,az]
-    imu_log = []
+    # gyro/accel 로그 저장 리스트
+    gyro_log = []
+    accel_log = []
     gyro = [0.0, 0.0, 0.0]
     accel = [0.0, 0.0, 0.0]
 
@@ -175,25 +176,14 @@ def record(target_shots):
                 g = gf.as_motion_frame().get_motion_data()
                 t_ns = int(gf.get_timestamp() * 1e6)
                 gyro = [g.x, g.y, g.z]
-                imu_log.append([t_ns, gyro[0], gyro[1], gyro[2], accel[0], accel[1], accel[2]])
+                gyro_log.append([t_ns, gyro[0], gyro[1], gyro[2]])
 
             af = frames.first_or_default(rs.stream.accel)
             if af:
                 a = af.as_motion_frame().get_motion_data()
                 t_ns = int(af.get_timestamp() * 1e6)
                 accel = [a.x, a.y, a.z]
-                imu_log.append([t_ns, gyro[0], gyro[1], gyro[2], accel[0], accel[1], accel[2]])
-
-            gf = frames.first_or_default(rs.stream.gyro)
-            af = frames.first_or_default(rs.stream.accel)
-            if gf and af:
-                g = gf.as_motion_frame().get_motion_data()
-                a = af.as_motion_frame().get_motion_data()
-                t_ns = int(gf.get_timestamp() * 1e6)
-                gyro = [g.x, g.y, g.z]
-                imu_log.append([t_ns, gyro[0], gyro[1], gyro[2], accel[0], accel[1], accel[2]])
-
-            af = frames.first_or_default(rs.stream.accel)
+                accel_log.append([t_ns, accel[0], accel[1], accel[2]])
 
         cf = frames.get_color_frame()
         df = frames.get_depth_frame()
@@ -235,18 +225,27 @@ def record(target_shots):
             print("[INFO] User interrupted")
             break
 
-    # 루프 종료
+    # 파이프라인 종료
     pipe.stop()
     cv.destroyAllWindows()
 
-    if imu_enabled and len(imu_log) > 0:
-        # User requested raw write: save imu_log rows in appended order without merging.
-        imu_path = os.path.join(FRAME_DIR, "imu_log.csv")
-        with open(imu_path, "w", newline='') as f:
+    # gyro와 accel을 별도 CSV로 intrinsics_out 디렉토리에 저장
+    gyro_path = os.path.join(SAVE_DIR, "gyro_log.csv")
+    accel_path = os.path.join(SAVE_DIR, "accel_log.csv")
+
+    if len(gyro_log) > 0:
+        with open(gyro_path, "w", newline='') as f:
             w = csv.writer(f)
-            w.writerow(['t_ns', 'gx', 'gy', 'gz', 'ax', 'ay', 'az'])
-            w.writerows(imu_log)
-        print(f"[INFO] Saved IMU log: {imu_path}")
+            w.writerow(['t_ns', 'gx', 'gy', 'gz'])
+            w.writerows(gyro_log)
+        print(f"[INFO] Saved gyro log: {gyro_path}")
+
+    if len(accel_log) > 0:
+        with open(accel_path, "w", newline='') as f:
+            w = csv.writer(f)
+            w.writerow(['t_ns', 'ax', 'ay', 'az'])
+            w.writerows(accel_log)
+        print(f"[INFO] Saved accel log: {accel_path}")
 
 def calibrate_intrinsics(rows, cols, square_size_m, dir):
     # 코너 3차원 좌표 생성
