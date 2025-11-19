@@ -145,7 +145,7 @@ def load_camera_poses(frame_dir):
             continue
 
         # 초기 코너 검출의 낮은 정밀도를 보완하기 위해 서브픽셀 활용
-        term = (cv.TERM_CRITERIA_EPS + cv.CALIB_CB_MAX_ITER, 30, 1e-3)
+        term = (cv.TERM_CRITERIA_EPS + cv.TERM_CRITERIA_MAX_ITER, 30, 1e-3)
         corners = cv.cornerSubPix(gray, corners, (11, 11), (-1, -1), term)
 
         # K, dist 설정
@@ -207,64 +207,86 @@ def load_camera_poses(frame_dir):
 
 
 
-# IMU accel로부터 중력 방향 추정 함수
-def gravity_from_accel(imu, poses, gyro_thresh=0.1):
+# 중력 벡터 프레임 별 매칭 함수
+def gravity_pairs(imu, poses, gyro_thresh=0.1):
     """
     Inputs:
-    imu: (N,7) [t_ns,gx,gy,gz,ax,ay,az]
-    gyro_thresh: 정지 구간 판별 기준(rad/s)
-    
+    imu(N,7): [t_ns, gx, gy, gz, ax, ay, az]
+    poses: load_camera_poses() 결과 리스트
+    gyro_thresh: 정지 구간 기준 임계치
+
     Outputs:
-    gravity_mean: (3,) 중력 방향 벡터 추정값
-    board_up_cam: (3,) 체커보드 위쪽 방향(카메라 프레임) 추정값
-    """
-    gyro = imu[:, 1:4]
-    accel = imu[:, 4:7]
-
-    # 각속도의 크기가 기준치 이하인 구간 선택 (정지 구간을 의미)
-    gravity_mean = None
-    if imu.size > 0:
-        gyro_norm = np.linalg.norm(gyro, axis=1)
-        mask = gyro_norm < gyro_thresh
-        if np.any(mask):
-            gravity_samples = accel[mask]
-            gravity_mean = gravity_samples.mean(axis=0)
-
-    # 카메라 프레임에서 체커보드의 법선 벡터 방향 계산
-    """
-    X축 : 체커보드 가로 방향 (cols)
-    Y축 : 체커보드 세로 방향 (rows)
-    Z축 : 체커보드 법선 방향 (위쪽)
-    """
+    카메라 좌표계 중력 벡터
+    gravity_cam_list: [array(3,), ...]
+    # IMU 좌표계 중력 벡터
+    gravity_imu_list: [array(3,), ...]
     
-    normals = []
-    # board 좌표계 -> 카메라 좌표계
-    # 지금 구한 rvec(slovePnP 결과)는 체커보드 좌표계-> 카메라 좌표계 변환 회전 행렬
-    # 체커보드 좌표계의 세로 방향(Y축): 보드에서 아래 방향
+    각 프레임 별로 쌍으로 묶인다.
+    """
+
+    t_ns   = imu[:, 0]
+    gyro    = imu[:, 1:4]
+    accel   = imu[:, 4:7]
+
+    # 체커보드 좌표계에서의 중력 방향(아래쪽)이라고 가정하는 축
     board_y = np.array([0.0, 1.0, 0.0])
 
-    for pose in poses:
-        rvec = pose["rvec"].reshape(3, 1)
-        
-        # 회전 벡터 -> 회전 행렬
-        # 축과 각도 표현을 행렬 형태로 변환(로드리게스 공식 사용)
-        R, _ = cv.Rodrigues(rvec)
-        
-        # 카메라 좌표계에서 본 보드 아래 방향
-        cam_y = R @ board_y
-        cam_y = cam_y.flatten()
-        cam_y /= (np.linalg.norm(cam_y) + 1e-12)
-        normals.append(cam_y)
-        
-    if len(normals) > 0:
-        normals = np.stack(normals, axis=0)
-        cam_y_mean = normals.mean(axis=0)
-        cam_y_mean /= (np.linalg.norm(cam_y_mean) + 1e-12)
-        cam_y_mean
+    gravity_cam_list = []
+    gravity_imu_list = []
 
-    print(cam_y_mean)
-    # 두 값을 함께 반환
-    return gravity_mean, cam_y_mean
+    # gyro 크기가 담긴 리스트
+    gyro_norm = np.linalg.norm(gyro, axis=1)
+
+    # gyro_norm 순회
+    for i, is_static in enumerate(gyro_norm < gyro_thresh):
+        
+        # 정지 구간이 아니면 건너뜀
+        if not is_static:
+            continue
+
+        # IMU 프레임 기준 중력 방향 (단위 벡터)
+        g_imu = accel[i] / (np.linalg.norm(accel[i]) + 1e-12)
+        
+        # poses 리스트에서 각 포즈의 t_ns
+        poses_ts = []
+        for pose in poses:
+            poses_ts.append(int(pose["t_ns"]))
+
+        pose_ts = np.array(poses_ts, dtype=np.int64)
+
+        # target_ts 이상이 처음 나오는 위치 찾기
+        idx = np.searchsorted(pose_ts, t_ns[i])
+
+        # 맨 앞
+        if idx == 0:
+            nearest = 0
+        
+        # 맨 뒤
+        elif idx >= len(pose_ts):
+            nearest = len(pose_ts) - 1
+            
+        # 중간
+        else:
+            before = idx - 1
+            after  = idx
+            if abs(pose_ts[before] - t_ns[i]) <= abs(pose_ts[after] - t_ns[i]):
+                nearest = before
+            else:
+                nearest = after
+        
+        p = poses[nearest]
+        rvec = p["rvec"].reshape(3, 1)
+        R, _ = cv.Rodrigues(rvec)  # 보드 -> 카메라
+
+        # 카메라 프레임 기준 중력 방향 (보드 +Y를 중력 방향으로 가정)
+        g_cam = R @ board_y
+        g_cam = g_cam.flatten()
+        g_cam /= (np.linalg.norm(g_cam) + 1e-12)
+
+        gravity_cam_list.append(g_cam)
+        gravity_imu_list.append(g_imu)
+
+    return gravity_cam_list, gravity_imu_list
 
 
 
@@ -350,25 +372,29 @@ def rotmat_to_rotvec(R):
 # extrinsic 회전 추정 (SVD / Kabsch)
 #   imu_pairs: IMU 기준 델타 회전 (N,3)
 #   cam_pairs: 카메라 기준 델타 회전 (N,3)
-#   최소제곱으로 R을 찾음: cam ≈ R * imu
+#   여러 개의 중력 방향 쌍(gravity_cam_list, gravity_imu_list)을 포함하여 추정
 # ------------------------------------------------------------------
-def estimate_rotation_extrinsic(camera_pairs, imu_pairs, g_cam=None, g_imu=None, gravity_weight=5):
+def estimate_rotation_extrinsic(camera_pairs, imu_pairs,
+                                gravity_cam_list=None, gravity_imu_list=None, gravity_weight=5):
     """
-    기존 delta 회전 쌍(cam_pairs, imu_pairs)에 더해 중력 벡터 쌍(g_cam, g_imu)을 포함하여
-    extrinsic 회전 R (IMU->CAM)을 Kabsch로 추정.
+    delta 회전 쌍(cam_pairs, imu_pairs)에 더해,
+    여러 개의 중력 방향 쌍(gravity_cam_list, gravity_imu_list)을 포함하여
+    extrinsic 회전 R (IMU->CAM)을 Kabsch로 추정한다.
 
-    gravity_weight: 중력 벡터 쌍을 몇 번 반복해서(가중치처럼) 포함할지.
+    gravity_cam_list: [(3,), ...] 카메라 프레임 중력 방향들
+    gravity_imu_list: [(3,), ...] IMU 프레임 중력 방향들
+    gravity_weight: 각 중력 쌍을 몇 번 반복해서(가중치처럼) 포함할지.
     """
     A_list = list(imu_pairs)
     B_list = list(camera_pairs)
 
-    if g_cam is not None and g_imu is not None:
-        # 둘 다 단위벡터로 가정; 부족하면 정규화
-        g_cam_n = g_cam / (np.linalg.norm(g_cam) + 1e-12)
-        g_imu_n = g_imu / (np.linalg.norm(g_imu) + 1e-12)
-        for _ in range(gravity_weight):
-            A_list.append(g_imu_n)
-            B_list.append(g_cam_n)
+    if gravity_cam_list is not None and gravity_imu_list is not None:
+        for g_cam, g_imu in zip(gravity_cam_list, gravity_imu_list):
+            g_cam_n = g_cam / (np.linalg.norm(g_cam) + 1e-12)
+            g_imu_n = g_imu / (np.linalg.norm(g_imu) + 1e-12)
+            for _ in range(gravity_weight):
+                A_list.append(g_imu_n)
+                B_list.append(g_cam_n)
 
     A = np.stack(A_list, axis=0)
     B = np.stack(B_list, axis=0)
@@ -390,15 +416,21 @@ def estimate_rotation_extrinsic(camera_pairs, imu_pairs, g_cam=None, g_imu=None,
 
 # ------------------------------------------------------------------
 # 연속 프레임 간 카메라 델타 회전 + 동일 시간 구간의 IMU 델타 회전 쌍 만들기
+#   - ts_offset_ns: 카메라 타임스탬프에 더해줄 IMU 타임 오프셋(ns).
+#                   두 센서 시계가 어긋난 경우 보정용으로 사용한다.
+#                   현재는 0으로 두고, 시계가 이미 동기라고 가정한다.
+#   - min_angle_deg: 카메라 델타 회전 각도가 이 값보다 작으면 쌍에서 제외.
+#                    (너무 작은 회전은 노이즈에 민감하므로 keyframe처럼 필터링)
 # ------------------------------------------------------------------
-def build_delta_pairs(poses, imu, max_dt_sec=0.5, ts_offset_ns=0):
-    """
+def build_delta_pairs(poses, imu, gap=3, min_angle_deg=1.0):
+    """연속된 포즈 사이의 델타 회전 쌍(cam, imu)을 만든다.
+
     poses: [{'t_ns', 'rvec', 'tvec'}, ...]
     imu:   (N,7) [t_ns,gx,gy,gz,ax,ay,az]
 
     반환:
-      cam_pairs: [ (3,), ... ]
-      imu_pairs: [ (3,), ... ]
+      cam_pairs: [ (3,), ... ]  # 카메라 기준 델타 회전 벡터들
+      imu_pairs: [ (3,), ... ]  # 같은 구간 IMU 적분 델타 회전 벡터들
     """
     cam_pairs = []
     imu_pairs = []
@@ -407,11 +439,12 @@ def build_delta_pairs(poses, imu, max_dt_sec=0.5, ts_offset_ns=0):
         p0 = poses[i]
         p1 = poses[i + 1]
 
-        t0 = p0["t_ns"] + ts_offset_ns
-        t1 = p1["t_ns"] + ts_offset_ns
+        # 타임스탬프 범위
+        t0 = p0["t_ns"]
+        t1 = p1["t_ns"]
 
-        # 너무 긴 구간은 회전 오차가 커질 수 있으므로 제한
-        if (t1 - t0) * 1e-9 > max_dt_sec:
+        # 너무 긴 구간은 제외 (나노 초 단위)
+        if (t1 - t0) * 1e-9 > gap:
             continue
 
         R0, _ = cv.Rodrigues(p0["rvec"].reshape(3, 1))
@@ -420,6 +453,12 @@ def build_delta_pairs(poses, imu, max_dt_sec=0.5, ts_offset_ns=0):
         # 카메라 좌표계에서의 상대 회전
         Rc = R0.T @ R1
         rc_vec = rotmat_to_rotvec(Rc)
+
+        # 회전각이 너무 작으면(거의 안 움직인 구간) 노이즈에 민감하므로 skip
+        angle_rad = np.linalg.norm(rc_vec)
+        angle_deg = np.degrees(angle_rad)
+        if angle_deg < min_angle_deg:
+            continue
 
         imu_rot = integrate_gyro(imu, t0, t1)
         if imu_rot is None:
@@ -434,46 +473,9 @@ def build_delta_pairs(poses, imu, max_dt_sec=0.5, ts_offset_ns=0):
 
 
 
-# ------------------------------------------------------------------
+
 # 타임 오프셋 grid search + extrinsic R 추정
-# ------------------------------------------------------------------
-def grid_search_time_offset(poses, imu, search_range_s=0.2, step_s=0.01, g_cam=None, g_imu=None, gravity_weight=5):
-    """
-    search_range_s: [-search_range_s, +search_range_s] 범위에서 오프셋 탐색
-    step_s: 검색 스텝 (초)
-    """
-    best = None
-    best_err = 1e9
-
-    offsets = np.arange(-search_range_s, search_range_s + 1e-9, step_s)
-
-    for off in offsets:
-        ts_off_ns = int(off * 1e9)
-        cam_pairs, imu_pairs = build_delta_pairs(poses, imu, ts_offset_ns=ts_off_ns)
-
-        if len(cam_pairs) < 8:
-            # 쌍이 너무 적으면 신뢰성 떨어져서 skip
-            continue
-
-        R = estimate_rotation_extrinsic(cam_pairs, imu_pairs, g_cam=g_cam, g_imu=g_imu, gravity_weight=gravity_weight)
-
-        A = np.stack(imu_pairs, axis=0)
-        B = np.stack(cam_pairs, axis=0)
-
-        A_rot = (R @ A.T).T
-        diff = A_rot - B
-        err = np.mean(np.linalg.norm(diff, axis=1))
-
-        if err < best_err:
-            best_err = err
-            best = {
-                "offset_s": off,
-                "R": R,
-                "err": err,
-                "pairs": len(A)
-            }
-
-    return best
+## 타임 오프셋 grid search + extrinsic R 추정 함수는 사용하지 않으므로 제거했습니다.
 
 
 
@@ -510,78 +512,92 @@ if __name__ == "__main__":
     # 해당 이미지의 카메라 포즈 
     poses = load_camera_poses(FRAME_DIR)
 
-    # accel을 이용해 중력 방향 출력
-    # 카메라 프레임에서 체커보드 위쪽 방향 추출
-    world_gravity, cam_gravity = gravity_from_accel(imu, poses)
+    # (IMU 중력 벡터, 카메라 좌표계 중력 벡터) 추출
+    gravity_cam_list, gravity_imu_list = gravity_pairs(
+        imu,
+        poses,
+        gyro_thresh=0.1,    # 정지 기준
+    )
     
-    if world_gravity is not None:
-        g_norm = float(np.linalg.norm(world_gravity))
-        # gravity 벡터와 gravity의 크기 출력
-        print(f"[INFO] estimated gravity ≈ {world_gravity} (norm={g_norm:.3f})")
-    else:
-        print("[WARN] Cannot estimate gravity from IMU accel data. (No stationary periods found.)")
+    if len(gravity_cam_list) == 0 or len(gravity_imu_list) == 0:
+        gravity_cam_list = None
+        gravity_imu_list = None
 
-    # 카메라 프레임에서 중력 방향
-    if cam_gravity is not None:
-        print(f"[INFO] mean board normal direction (camera frame) ≈ {cam_gravity}")
-    else:
-        print("[WARN] Fail to extract checker board normal direction.")
+    # gyro 적분으로 얻은 델타 회전 + 중력 방향 제약 사용
+    # 체커보드 특징점을 활용한 카메라 회전 행렬 추정
+    # 이 두 값을 근사시켜 IMU 변환 회전 행렬을 구한다.
+    cam_pairs, imu_pairs = build_delta_pairs(poses, imu)
 
-    # # 중력 벡터는 아래 방향이고, 체커보드는 벽에 걸려 있지만 격자 rows(+Y)가
-    # # 실제 세계의 "위쪽"(중력 반대 방향)과 평행하도록 설치되었다고 가정한다.
-    # # 따라서:
-    # #   - accel 평균으로 IMU 프레임에서의 중력 방향 g_imu_vec(아래)을 얻고,
-    # #   - solvePnP로 얻은 rvec을 통해 체커보드 +Y 축을 카메라 프레임으로 옮긴
-    # #     board_up_cam을 world-up proxy로 사용하며,
-    # #   - 카메라 프레임에서의 중력 방향은 -board_up_cam 으로 본다.
-    # # 이 (g_imu_vec, g_cam_vec) 쌍을 delta 회전 쌍(cam_pairs, imu_pairs)에 추가하여
-    # # extrinsic R(imu->cam)을 추정할 때 중력 방향을 추가 구속 조건으로 활용한다.
-    # g_cam_vec = None
-    # g_imu_vec = None
-    # if world_gravity is not None and cam_gravity is not None:
-    #     # IMU에서 얻은 중력 벡터 (IMU 프레임 기준, 아래 방향)
-    #     g_imu_vec = world_gravity / (np.linalg.norm(world_gravity) + 1e-12)
+    if len(cam_pairs) < 8:
+        raise RuntimeError("[Error] Not enough matching rotation pairs to estimate IMU extrinsics.")
 
-    #     # 체커보드 +Y를 월드 "위쪽"으로 가정했으므로,
-    #     # 카메라 프레임에서의 중력(아래 방향)은 board_normal_vector의 반대 방향으로 본다.
-    #     g_cam_vec = -cam_gravity
-    #     print("[INFO] using gravity constraint (board +Y as world-up proxy): g_imu -> g_cam")
-    # else:
-    #     print("[INFO] gravity constraint unavailable; falling back to gyro-only pairs.")
+    R = estimate_rotation_extrinsic(
+        cam_pairs,
+        imu_pairs,
+        gravity_cam_list=gravity_cam_list,
+        gravity_imu_list=gravity_imu_list,
+        gravity_weight=5,
+    )
 
-    # # 타임 오프셋 + extrinsic 회전 추정
-    # best = grid_search_time_offset(
-    #     poses,
-    #     imu,
-    #     search_range_s=0.2,
-    #     step_s=0.01,
-    #     g_cam=g_cam_vec,
-    #     g_imu=g_imu_vec,
-    #     gravity_weight=5
-    # )
-    # if best is None:
-    #     print("[ERROR] 매칭 가능한 회전 쌍이 부족하거나 search_range/step이 적절하지 않습니다.")
-
-    # print(f"[INFO] best offset: {best['offset_s']:.6f} s")
-    # print(f"[INFO] mean error:  {best['err']:.6f}")
-    # print(f"[INFO] used pairs:  {best['pairs']}")
-
-    # R = best["R"]
-
-    # extrinsics 저장
-    out = {
-        "time_offset_s": float(best["offset_s"]),
-        "R_imu_to_cam": R.tolist(),
-        "t_imu_to_cam_m": [0.0, 0.0, 0.0],  # 이 스크립트에서는 translation은 추정하지 않음
-        "note": (
-            "rotation estimated from delta-rotations (gyro) + gravity constraint (accel+board normal). "
-            "board normal treated as world-up proxy; sign adjusted relative to IMU gravity."
-        )
+    # IMU extrinsics를 YAML로 저장
+    out_dict = {
+        "imu_extrinsics": {
+            "description": "Rotation from IMU frame to Camera frame (R_imu_to_cam)",
+            "R_imu_to_cam": R.tolist(),   # 3x3 회전 행렬
+            "t_imu_to_cam_m": [0.0, 0.0, 0.0]
+        }
     }
 
     os.makedirs(SAVE_DIR, exist_ok=True)
-    out_path = os.path.join(SAVE_DIR, "IMU.yaml")
+    out_path = os.path.join(SAVE_DIR, "IMU_extrinsics.yaml")
     with open(out_path, "w") as f:
-        yaml.safe_dump(out, f, sort_keys=False, allow_unicode=True)
+        yaml.safe_dump(out_dict, f, sort_keys=False, allow_unicode=True)
 
-    print(f"[OK] Saved {out_path}")
+    # --------------------------------------------------------------
+    # factory에서 제공하는 IMU->Camera extrinsics가 있으면 별도 YAML로 저장
+    #   기대 파일: intrinsics_out/factory_intrinsics.yaml
+    #   예상 구조 예시:
+    #   imu_extrinsics:
+    #     R_imu_to_cam: [[...],[...],[...]]
+    #     t_imu_to_cam_m: [x,y,z]
+    # --------------------------------------------------------------
+    factory_intr_path = os.path.join(SAVE_DIR, "factory_intrinsics.yaml")
+    if os.path.exists(factory_intr_path):
+        try:
+            with open(factory_intr_path, "r") as f:
+                factory_data = yaml.safe_load(f)
+
+            # 1) 최상단에 바로 imu_extrinsics가 있는 경우
+            imu_ext = factory_data.get("imu_extrinsics")
+
+            # 2) 없으면, "imu" 또는 "motion" 같은 키 아래에 있을 수도 있으니 한번 더 찾아봄
+            if imu_ext is None:
+                for key in ["imu", "motion", "imu_to_color", "imu_to_cam"]:
+                    if key in factory_data and isinstance(factory_data[key], dict):
+                        cand = factory_data[key].get("imu_extrinsics")
+                        if cand is not None:
+                            imu_ext = cand
+                            break
+
+            if imu_ext is not None:
+                R_factory = imu_ext.get("R_imu_to_cam")
+                t_factory = imu_ext.get("t_imu_to_cam_m", [0.0, 0.0, 0.0])
+
+                if R_factory is not None:
+                    factory_out = {
+                        "imu_extrinsics_factory": {
+                            "description": "Factory IMU to Camera extrinsics (R_imu_to_cam)",
+                            "R_imu_to_cam": R_factory,
+                            "t_imu_to_cam_m": t_factory,
+                        }
+                    }
+
+                    factory_out_path = os.path.join(SAVE_DIR, "IMU_extrinsics_factory.yaml")
+                    with open(factory_out_path, "w") as f:
+                        yaml.safe_dump(factory_out, f, sort_keys=False, allow_unicode=True)
+
+                    print(f"[OK] Factory IMU extrinsics saved to {factory_out_path}")
+            else:
+                print("[INFO] No imu_extrinsics entry found in factory_intrinsics.yaml")
+        except Exception as e:
+            print(f"[WARN] Failed to load factory IMU extrinsics: {e}")
