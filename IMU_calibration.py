@@ -521,7 +521,6 @@ if __name__ == "__main__":
         gravity_imu_lists,
     )
 
-    # IMU extrinsics를 YAML로 저장
     out_dict = {
         "IMU_extrinsics": {
             # 3x3 회전 행렬
@@ -529,7 +528,8 @@ if __name__ == "__main__":
             "t_imu_to_cam": [0.0, 0.0, 0.0]
         }
     }
-
+    
+    # IMU extrinsics를 YAML로 저장
     os.makedirs(SAVE_DIR, exist_ok=True)
     out_path = os.path.join(SAVE_DIR, "IMU_extrinsics.yaml")
     with open(out_path, "w") as f:
