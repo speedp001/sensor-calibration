@@ -25,6 +25,10 @@ def find_corners(img_bgr, rows, cols):
     
     return True, corners
 
+
+
+
+
 # IMU 기능 여부 확인
 def device_IMU():
     
@@ -46,6 +50,10 @@ def device_IMU():
                 return True
 
     return False
+
+
+
+
 
 # 호환 가능한 color/depth 프로파일 선택
 def device_RGBD():
@@ -108,6 +116,10 @@ def device_RGBD():
     chosen_w, chosen_h, chosen_fps = menu[int(choice) - 1]
     print(f"[INFO] Selected profile: {chosen_w}x{chosen_h} @ {chosen_fps}fps")
     return (chosen_w, chosen_h, chosen_fps)
+
+
+
+
 
 def record(target_shots):
     
@@ -247,6 +259,10 @@ def record(target_shots):
             w.writerows(accel_log)
         print(f"[INFO] Saved accel log: {accel_path}")
 
+
+
+
+# 카메라 내부 파라미터 보정 함수
 def calibrate_intrinsics(rows, cols, square_size_m, dir):
     # 코너 3차원 좌표 생성
     corner_array = np.zeros((cols * rows, 3), np.float32)
