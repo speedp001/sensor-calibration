@@ -463,7 +463,7 @@ def estimate_rotation_extrinsic(rotation_cam_list,
 if __name__ == "__main__":
     
     # 저장 경로 설정
-    SAVE_DIR = "intrinsics_out"
+    SAVE_DIR = "result"
     FRAME_DIR = os.path.join(SAVE_DIR, "frames")
 
     # 체커보드 크기
