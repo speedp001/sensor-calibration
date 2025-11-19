@@ -414,7 +414,6 @@ def rotation_pairs(poses, imu, gap, min_angle):
 
 
 
-
 # IMU 변환 행렬 추정 함수
 # Gyroscope와 Accelerometer 데이터를 모두 활용
 def estimate_rotation_extrinsic(rotation_cam_list,
