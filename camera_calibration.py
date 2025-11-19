@@ -371,7 +371,7 @@ def calibrate_intrinsics(rows, cols, square_size_m, dir):
 if __name__ == "__main__":
     
     # 결과 저장 경로
-    SAVE_DIR = "intrinsics_out"
+    SAVE_DIR = "result"
     FRAME_DIR = os.path.join(SAVE_DIR, "frames")
 
     # 캡쳐 개수 설정
